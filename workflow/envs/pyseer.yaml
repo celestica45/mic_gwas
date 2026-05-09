@@ -1,0 +1,10 @@
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - pyseer
+  - mash
+  - pandas
+  - matplotlib
+  - numpy

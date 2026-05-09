@@ -1,0 +1,93 @@
+datasets:
+  oxacillin:
+    raw_metadata: "/home/ughoc/mic_gwas/raw_metadata/oxacillin_amr.csv"
+    antibiotic_name: "oxacillin"
+    organism: "Staphylococcus aureus"
+    existing_clean_metadata: null
+    existing_assembly_manifest: null
+
+active_antibiotics:
+  - oxacillin
+
+skip_metadata: true
+skip_assembly_metadata: true #to get info about the tool used for assembly
+skip_sequence_metadata: true #to get info about paired-end or single reads
+skip_assembly_download: true
+skip_quast: true
+skip_prokka: true
+skip_panaroo_qc: true
+skip_pangenome: false
+skip_phenotype_data: false
+skip_gwas_population_structure: false
+skip_gwas_runs: false
+
+ncbi_datasets:
+  include: "genome"
+
+quast:
+  threads: 4
+  min_contig_length: 500
+  extension: "fa"
+  reference: "/home/ughoc/mic_gwas/resources/USA300_FPR3757.fasta"
+  annotation: "/home/ughoc/mic_gwas/resources/USA300_FPR3757.gff3"
+
+prokka:
+  threads: 4
+  extension: "fa"
+
+panaroo:
+  threads: 4
+  clean_mode: "strict"
+
+panaroo_qc:
+  threads: 1
+  graph_type: "all"
+  ref_db: "resources/panaroo_qc/refseq.genomes.k21s1000.msh"
+  download_ref_db: true
+  ref_db_url: "https://gembox.cbcb.umd.edu/mash/refseq.genomes.k21s1000.msh"
+
+gwas:
+  active_inputs:
+    - genes
+
+  population_structure:
+    mash_mds:
+      sketch_size: 10000
+      max_scree_dimensions: 1
+
+  phenotype:
+    sample_column: "assembly_ID"
+    log2_column: "mic_log2"
+
+  covariates:
+    columns:
+      - country
+      - collection_year
+
+  plots:
+    gene_manhattan:
+      label_top_n: 0
+      label_significant: true
+      label_max: 25
+
+  inputs:
+    genes:
+      population_structure:
+        methods:
+          - none
+          - mash_mds
+        mds_dimensions: 3
+        covariates: []
+
+    snps:
+      population_structure:
+        methods:
+          - mash_mds
+        mds_dimensions: 8
+        covariates: []
+
+    kmers:
+      population_structure:
+        methods:
+          - phylogeny_lmm
+        covariates: []

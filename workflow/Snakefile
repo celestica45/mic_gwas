@@ -1,0 +1,1005 @@
+configfile: "config/config.yaml"
+
+import shlex
+
+
+# Read dataset settings from config/config.yaml.
+DATASETS = config["datasets"]
+
+# Only antibiotics listed here will run.
+ACTIVE_ANTIBIOTICS = config["active_antibiotics"]
+NCBI_DATASETS = config.get("ncbi_datasets", {})
+QUAST = config.get("quast", {})
+GWAS = config.get("gwas", {})
+GWAS_PHENOTYPE = GWAS.get("phenotype", {})
+GWAS_INPUTS = GWAS.get("inputs", {})
+GWAS_POPULATION_STRUCTURE = GWAS.get("population_structure", {})
+MASH_MDS = GWAS_POPULATION_STRUCTURE.get("mash_mds", {})
+
+IMPLEMENTED_GWAS_INPUTS = {"genes"}
+KNOWN_GWAS_INPUTS = {"genes", "snps", "kmers"}
+ALLOWED_GENE_POPULATION_METHODS = {"none", "mash_mds"}
+
+
+def optional_quast_arg(flag, value):
+    if value in [None, "", "null"]:
+        return ""
+    return f"{flag} {shlex.quote(str(value))}"
+
+
+def quast_annotation_arg():
+    reference = QUAST.get("reference")
+    annotation = QUAST.get("annotation")
+
+    if annotation not in [None, "", "null"] and reference in [None, "", "null"]:
+        raise ValueError("quast.annotation requires quast.reference to be set.")
+
+    return optional_quast_arg("-g", annotation)
+
+
+def optional_config_arg(flag, value):
+    if value in [None, "", "null"]:
+        return ""
+    return f"{flag} {shlex.quote(str(value))}"
+
+
+def as_list(value):
+    if value in [None, "", "null"]:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
+def comma_join(values):
+    values = as_list(values)
+    return ", ".join(str(value) for value in values) if values else "none"
+
+
+def input_config(input_name):
+    return GWAS_INPUTS.get(input_name, {})
+
+
+def population_methods(input_name):
+    return as_list(
+        input_config(input_name).get("population_structure", {}).get("methods", [])
+    )
+
+
+def mds_dimensions(input_name):
+    return (
+        input_config(input_name)
+        .get("population_structure", {})
+        .get("mds_dimensions", 8)
+    )
+
+
+def covariates_for_input(input_name):
+    return as_list(
+        input_config(input_name).get("population_structure", {}).get("covariates", [])
+    )
+
+
+def covariate_folder(input_name):
+    covariates = covariates_for_input(input_name)
+    if not covariates:
+        return "no_covariates"
+    return "covariates_" + "_".join(str(covariate) for covariate in covariates)
+
+
+def phenotype_column_name(wildcards):
+    return f"{DATASETS[wildcards.antibiotic]['antibiotic_name']}_log2"
+
+
+def gene_fixed_effects_dir(antibiotic):
+    return (
+        f"results/{antibiotic}/gwas/fixed_effects/gene/"
+        f"mash_mds/{covariate_folder('genes')}"
+    )
+
+
+def validate_input_covariates(input_name):
+    configured = set(as_list(GWAS.get("covariates", {}).get("columns", [])))
+    requested = set(covariates_for_input(input_name))
+    missing = sorted(requested - configured)
+    if missing:
+        raise ValueError(
+            f"GWAS {input_name} covariate(s) not present in gwas.covariates.columns: "
+            f"{comma_join(missing)}"
+        )
+
+
+def pyseer_covariate_args(input_name, antibiotic):
+    validate_input_covariates(input_name)
+    covariates = covariates_for_input(input_name)
+    if not covariates:
+        return ""
+
+    metadata = f"results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv"
+    all_columns = ["wgs_id"] + as_list(GWAS.get("covariates", {}).get("columns", []))
+    use_covariates = []
+    for covariate in covariates:
+        index = all_columns.index(covariate) + 1
+        suffix = "q" if covariate == "collection_year" else ""
+        use_covariates.append(f"{index}{suffix}")
+
+    return (
+        f"--covariates {shlex.quote(metadata)} "
+        f"--use-covariates {' '.join(use_covariates)}"
+    )
+
+
+def active_gwas_inputs():
+    requested = as_list(GWAS.get("active_inputs", []))
+    if "all" in requested:
+        requested = ["genes", "snps", "kmers"]
+    return requested
+
+
+def validate_gwas_config():
+    if config.get("skip_gwas_runs", True):
+        return
+
+    active = active_gwas_inputs()
+    unknown = sorted(set(active) - KNOWN_GWAS_INPUTS)
+    if unknown:
+        raise ValueError(f"Unknown GWAS input(s): {comma_join(unknown)}")
+
+    not_implemented = sorted(set(active) - IMPLEMENTED_GWAS_INPUTS)
+    if not_implemented:
+        raise ValueError(
+            "These GWAS input(s) are config-ready but not implemented yet: "
+            f"{comma_join(not_implemented)}"
+        )
+
+    if "genes" in active and config.get("skip_pangenome", False):
+        raise ValueError(
+            "gwas.active_inputs includes genes, but skip_pangenome is true. "
+            "Gene GWAS input requires Panaroo pangenome outputs."
+        )
+
+    gene_methods = set(population_methods("genes"))
+    invalid_gene_methods = sorted(gene_methods - ALLOWED_GENE_POPULATION_METHODS)
+    if "genes" in active and invalid_gene_methods:
+        raise ValueError(
+            "Unsupported genes population structure method(s): "
+            f"{comma_join(invalid_gene_methods)}. "
+            f"Allowed now: {comma_join(sorted(ALLOWED_GENE_POPULATION_METHODS))}"
+        )
+
+    validate_input_covariates("genes")
+
+
+validate_gwas_config()
+
+
+def panaroo_qc_ref_db_path():
+    return config.get("panaroo_qc", {}).get("ref_db")
+
+
+def panaroo_qc_ref_db_rule_output():
+    ref_db = panaroo_qc_ref_db_path()
+    if ref_db in [None, "", "null"]:
+        return "resources/panaroo_qc/.unused_ref_db"
+    return ref_db
+
+
+def panaroo_qc_ref_db_inputs(wildcards=None):
+    if config.get("skip_panaroo_qc", False):
+        return []
+
+    ref_db = panaroo_qc_ref_db_path()
+    if ref_db in [None, "", "null"]:
+        return []
+
+    return [ref_db]
+
+
+def panaroo_qc_ref_db_arg():
+    ref_db = panaroo_qc_ref_db_path()
+    if ref_db in [None, "", "null"]:
+        return ""
+
+    return f"--ref_db {shlex.quote(str(ref_db))}"
+
+
+def assembly_dependencies(wildcards):
+    if config.get("skip_assembly_download", False):
+        return []
+
+    return [
+        f"results/{wildcards.antibiotic}/downloads/{wildcards.antibiotic}_assembly_manifest.csv",
+        f"results/{wildcards.antibiotic}/assemblies",
+    ]
+
+
+def prokka_dependency(wildcards):
+    if config.get("skip_prokka", False):
+        return []
+    return [f"results/{wildcards.antibiotic}/annotation/prokka/.prokka_done"]
+
+
+def prokka_outputs():
+    if config.get("skip_prokka", False):
+        return []
+
+    return expand(
+        "results/{antibiotic}/annotation/prokka/.prokka_done",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+
+
+def pangenome_outputs():
+    if config.get("skip_pangenome", False):
+        return []
+
+    outputs = []
+    outputs += expand(
+        "results/{antibiotic}/pangenome/panaroo/gene_presence_absence.csv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/pangenome/panaroo/core_gene_alignment.aln",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    return outputs
+
+
+def metadata_outputs():
+    # If true, skip this metadata-cleaning step.
+    if config.get("skip_metadata", False):
+        return []
+
+    outputs = []
+
+    # Make one clean metadata CSV and one summary for each active antibiotic.
+    outputs += expand(
+        "results/{antibiotic}/metadata/{antibiotic}_clean_metadata.csv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/metadata/{antibiotic}_metadata_summary.yaml",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/metadata/{antibiotic}_clean_metadata_with_assembly.csv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/metadata/{antibiotic}_mic_log2_stats.csv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/metadata/{antibiotic}_mic_log2_counts.csv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/metadata/{antibiotic}_mic_log2_pie_chart.png",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+
+    if not config.get("skip_assembly_metadata", False):
+        outputs += expand(
+            "results/{antibiotic}/metadata/{antibiotic}_assembly_metadata.csv",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+
+    if not config.get("skip_sequence_metadata", False):
+        outputs += expand(
+            "results/{antibiotic}/metadata/{antibiotic}_sequencing_metadata.csv",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+        outputs += expand(
+            "results/{antibiotic}/metadata/{antibiotic}_combined_metadata.csv",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+
+    return outputs
+
+
+def assembly_download_outputs():
+    if config.get("skip_assembly_download", False):
+        return []
+
+    outputs = []
+    outputs += expand(
+        "results/{antibiotic}/downloads/{antibiotic}_assembly_accessions.txt",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/downloads/{antibiotic}_assembly_manifest.csv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    return outputs
+
+
+def phenotype_data_outputs():
+    if config.get("skip_phenotype_data", False):
+        return []
+
+    outputs = []
+    outputs += expand(
+        "results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+
+    return outputs
+
+
+def gwas_input_outputs():
+    outputs = []
+    outputs += expand(
+        "results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    if "genes" in active_gwas_inputs():
+        outputs += expand(
+            "results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+        outputs += expand(
+            "results/{antibiotic}/pangenome/panaroo/core_gene_alignment.aln",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+
+    return outputs
+
+
+def gwas_population_structure_outputs():
+    if config.get("skip_gwas_population_structure", False):
+        return []
+
+    outputs = []
+    if "mash_mds" in population_methods("genes"):
+        outputs += expand(
+            "results/{antibiotic}/gwas/population_structure/mash_mds/mash_sketch.msh",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+        outputs += expand(
+            "results/{antibiotic}/gwas/population_structure/mash_mds/mash.tsv",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+        outputs += expand(
+            "results/{antibiotic}/gwas/population_structure/mash_mds/scree_plot.png",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+
+    return outputs
+
+
+def gwas_fixed_effects_outputs(respect_skip=True):
+    if respect_skip and config.get("skip_gwas_runs", True):
+        return []
+
+    outputs = []
+    if "genes" in active_gwas_inputs() and "mash_mds" in population_methods("genes"):
+        for antibiotic in ACTIVE_ANTIBIOTICS:
+            outdir = gene_fixed_effects_dir(antibiotic)
+            outputs.extend(
+                [
+                    f"{outdir}/{antibiotic}_gene_pyseer.txt",
+                    f"{outdir}/{antibiotic}_gene_patterns.txt",
+                    f"{outdir}/{antibiotic}_gene_top_hits.tsv",
+                    f"{outdir}/{antibiotic}_gene_qq_plot.png",
+                    f"{outdir}/{antibiotic}_gene_significance_thresholds.txt",
+                    f"{outdir}/{antibiotic}_gene_notes_summary.tsv",
+                    f"{outdir}/{antibiotic}_gene_manhattan_plot.png",
+                    f"{outdir}/mash_mds.pkl",
+                ]
+            )
+
+    return outputs
+
+
+def panaroo_qc_outputs():
+    if config.get("skip_panaroo_qc", False):
+        return []
+
+    return expand(
+        "results/{antibiotic}/qc/panaroo_qc/.qc_done",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+
+
+def panaroo_qc_dependency(wildcards):
+    if config.get("skip_panaroo_qc", False):
+        return []
+    return [f"results/{wildcards.antibiotic}/qc/panaroo_qc/.qc_done"]
+
+
+def quast_outputs():
+    if config.get("skip_quast", False):
+        return []
+
+    outputs = []
+    outputs += expand(
+        "results/{antibiotic}/qc/quast/report.tsv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/qc/quast/report.txt",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    outputs += expand(
+        "results/{antibiotic}/qc/quast/transposed_report.tsv",
+        antibiotic=ACTIVE_ANTIBIOTICS,
+    )
+    return outputs
+
+
+rule all:
+    input:
+        metadata_outputs(),
+        assembly_download_outputs(),
+        quast_outputs(),
+        prokka_outputs(),
+        panaroo_qc_outputs(),
+        pangenome_outputs(),
+        phenotype_data_outputs(),
+        gwas_population_structure_outputs(),
+        gwas_fixed_effects_outputs(),
+
+
+rule quast_stage:
+    input:
+        quast_outputs(),
+
+
+rule prokka_stage:
+    input:
+        prokka_outputs(),
+
+
+rule phenotype_data_stage:
+    input:
+        phenotype_data_outputs(),
+    params:
+        phenotype_column=GWAS_PHENOTYPE.get("log2_column", "mic_log2"),
+        sample_column=GWAS_PHENOTYPE.get("sample_column", "assembly_ID"),
+        covariates=comma_join(GWAS.get("covariates", {}).get("columns", [])),
+    message:
+        "Phenotype data stage: phenotype={params.phenotype_column}; sample={params.sample_column}; covariates={params.covariates}"
+
+
+rule gwas_inputs_stage:
+    input:
+        gwas_input_outputs(),
+    params:
+        active_inputs=comma_join(active_gwas_inputs()),
+        phenotype_column=GWAS_PHENOTYPE.get("log2_column", "mic_log2"),
+        sample_column=GWAS_PHENOTYPE.get("sample_column", "assembly_ID"),
+        genes_methods=comma_join(population_methods("genes")),
+        snps_methods=comma_join(population_methods("snps")),
+        kmers_methods=comma_join(population_methods("kmers")),
+    message:
+        "GWAS input stage: active_inputs={params.active_inputs}; phenotype={params.phenotype_column}; sample={params.sample_column}; genes_methods={params.genes_methods}; snps_methods={params.snps_methods}; kmers_methods={params.kmers_methods}"
+
+
+rule gwas_population_structure_stage:
+    input:
+        gwas_population_structure_outputs(),
+
+
+rule gwas_gene_fixed_effects_stage:
+    input:
+        gwas_fixed_effects_outputs(respect_skip=False),
+
+
+rule panaroo_qc_stage:
+    input:
+        panaroo_qc_outputs(),
+
+
+rule clean_metadata:
+    input:
+        # wildcards.antibiotic comes from the output path.
+        raw_metadata=lambda wildcards: DATASETS[wildcards.antibiotic]["raw_metadata"],
+    output:
+        clean_metadata="results/{antibiotic}/metadata/{antibiotic}_clean_metadata.csv",
+        clean_metadata_with_assembly="results/{antibiotic}/metadata/{antibiotic}_clean_metadata_with_assembly.csv",
+        summary="results/{antibiotic}/metadata/{antibiotic}_metadata_summary.yaml",
+        mic_log2_stats="results/{antibiotic}/metadata/{antibiotic}_mic_log2_stats.csv",
+        mic_log2_counts="results/{antibiotic}/metadata/{antibiotic}_mic_log2_counts.csv",
+        mic_log2_pie_chart="results/{antibiotic}/metadata/{antibiotic}_mic_log2_pie_chart.png",
+    params:
+        antibiotic_name=lambda wildcards: DATASETS[wildcards.antibiotic][
+            "antibiotic_name"
+        ],
+        organism=lambda wildcards: DATASETS[wildcards.antibiotic]["organism"],
+    shell:
+        """
+        python workflow/scripts/clean_metadata.py \
+          --input {input.raw_metadata} \
+          --output {output.clean_metadata} \
+          --output-with-assembly {output.clean_metadata_with_assembly} \
+          --summary {output.summary} \
+          --mic-log2-stats {output.mic_log2_stats} \
+          --mic-log2-counts {output.mic_log2_counts} \
+          --mic-log2-pie-chart {output.mic_log2_pie_chart} \
+          --antibiotic-name '{params.antibiotic_name}' \
+          --organism '{params.organism}'
+        """
+
+
+rule prepare_pyseer_phenotype:
+    input:
+        metadata="results/{antibiotic}/metadata/{antibiotic}_clean_metadata_with_assembly.csv",
+    output:
+        phenotype_tsv="results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
+        metadata_tsv="results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv",
+    params:
+        sample_column=GWAS_PHENOTYPE.get("sample_column", "assembly_ID"),
+        log2_column=GWAS_PHENOTYPE.get("log2_column", "mic_log2"),
+        log2_column_name=lambda wc: f"{DATASETS[wc.antibiotic]['antibiotic_name']}_log2",
+        covariates=lambda wc: " ".join(GWAS.get("covariates", {}).get("columns", [])),
+    message:
+        "Preparing phenotype data for {wildcards.antibiotic}: sample={params.sample_column}, log2={params.log2_column}, covariates={params.covariates}"
+    shell:
+        """
+        echo "Phenotype data input: {wildcards.antibiotic}"
+        echo "Sample column: {params.sample_column}"
+        echo "Log2 phenotype column: {params.log2_column}"
+        echo "Covariates: {params.covariates}"
+        python workflow/scripts/prepare_pyseer_phenotype.py \
+          --metadata {input.metadata} \
+          --phenotype-tsv {output.phenotype_tsv} \
+          --metadata-tsv {output.metadata_tsv} \
+          --sample-column {params.sample_column} \
+          --log2-column {params.log2_column} \
+          --log2-column-name {params.log2_column_name} \
+          --covariates {params.covariates}
+        """
+
+
+rule mash_sketch_assemblies:
+    input:
+        assembly_dependencies,
+    output:
+        sketch="results/{antibiotic}/gwas/population_structure/mash_mds/mash_sketch.msh",
+    params:
+        assemblies_dir="results/{antibiotic}/assemblies",
+        outprefix="results/{antibiotic}/gwas/population_structure/mash_mds/mash_sketch",
+        sketch_size=MASH_MDS.get("sketch_size", 10000),
+        extension=config.get("prokka", {}).get("extension", "fa"),
+        mds_dimensions=lambda wc: input_config("genes")
+        .get("population_structure", {})
+        .get("mds_dimensions", 8),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "GWAS population structure for {wildcards.antibiotic}: method=mash_mds, assemblies={params.assemblies_dir}, mds_dimensions={params.mds_dimensions}"
+    shell:
+        """
+        echo "GWAS population structure: {wildcards.antibiotic}"
+        echo "Method: mash_mds"
+        echo "Assembly directory: {params.assemblies_dir}"
+        echo "MDS dimensions: {params.mds_dimensions}"
+        mkdir -p $(dirname {output.sketch})
+        mash sketch \
+          -s {params.sketch_size} \
+          -o {params.outprefix} \
+          {params.assemblies_dir}/*.{params.extension}
+        """
+
+
+rule calculate_mash_distances:
+    input:
+        sketch="results/{antibiotic}/gwas/population_structure/mash_mds/mash_sketch.msh",
+    output:
+        raw_distances="results/{antibiotic}/gwas/population_structure/mash_mds/mash_raw.tsv",
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Calculating raw Mash distance matrix for {wildcards.antibiotic}: {output.raw_distances}"
+    shell:
+        """
+        mash dist {input.sketch} {input.sketch} | square_mash > {output.raw_distances}
+        """
+
+
+rule normalize_mash_distance_labels:
+    input:
+        raw_distances="results/{antibiotic}/gwas/population_structure/mash_mds/mash_raw.tsv",
+        manifest="results/{antibiotic}/downloads/{antibiotic}_assembly_manifest.csv",
+    output:
+        distances="results/{antibiotic}/gwas/population_structure/mash_mds/mash.tsv",
+    message:
+        "Normalizing Mash labels for {wildcards.antibiotic}: {output.distances}"
+    shell:
+        """
+        python workflow/scripts/normalize_mash_distances.py \
+          --manifest {input.manifest} \
+          --input {input.raw_distances} \
+          --output {output.distances}
+        """
+
+
+rule plot_mash_mds_scree:
+    input:
+        distances="results/{antibiotic}/gwas/population_structure/mash_mds/mash.tsv",
+    output:
+        plot="results/{antibiotic}/gwas/population_structure/mash_mds/scree_plot.png",
+    params:
+        max_dimensions=MASH_MDS.get("max_scree_dimensions", 30),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Creating Mash MDS scree plot for {wildcards.antibiotic}: {output.plot}"
+    shell:
+        """
+        scree_plot_pyseer \
+          --max-dimensions {params.max_dimensions} \
+          --output {output.plot} \
+          {input.distances}
+        """
+
+
+rule run_pyseer_gene_fixed_effects_mash_mds:
+    input:
+        phenotype="results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
+        metadata="results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv",
+        rtab="results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
+        distances="results/{antibiotic}/gwas/population_structure/mash_mds/mash.tsv",
+    output:
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
+        patterns="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_patterns.txt",
+        mds="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/mash_mds.pkl",
+    params:
+        outdir="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}",
+        phenotype_column=phenotype_column_name,
+        mds_dimensions=lambda wc: mds_dimensions("genes"),
+        covariates=lambda wc: " ".join(covariates_for_input("genes")),
+        covariate_args=lambda wc: pyseer_covariate_args("genes", wc.antibiotic),
+        covariate_folder=lambda wc: covariate_folder("genes"),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Running fixed-effects gene GWAS for {wildcards.antibiotic}: population=mash_mds, covariates={params.covariate_folder}, mds_dimensions={params.mds_dimensions}"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python workflow/scripts/validate_pyseer_gene_inputs.py \
+          --phenotype {input.phenotype} \
+          --rtab {input.rtab} \
+          --distances {input.distances} \
+          --metadata {input.metadata} \
+          --covariates {params.covariates}
+        pyseer \
+          --continuous \
+          --phenotypes {input.phenotype} \
+          --phenotype-column {params.phenotype_column} \
+          --pres {input.rtab} \
+          --distances {input.distances} \
+          --save-m {params.outdir}/mash_mds \
+          --max-dimensions {params.mds_dimensions} \
+          --output-patterns {output.patterns} \
+          {params.covariate_args} \
+          > {output.pyseer}
+        test -s {output.pyseer} || (echo "pyseer did not create {output.pyseer}" >&2; exit 1)
+        test -s {output.patterns} || (echo "pyseer did not create {output.patterns}" >&2; exit 1)
+        test -s {output.mds} || (echo "pyseer did not create {output.mds}" >&2; exit 1)
+        """
+
+
+rule summarize_gene_pyseer_top_hits:
+    input:
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
+    output:
+        top_hits="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_top_hits.tsv",
+    message:
+        "Sorting fixed-effects gene GWAS hits for {wildcards.antibiotic}: {output.top_hits}"
+    shell:
+        """
+        mkdir -p $(dirname {output.top_hits})
+        head -n 1 {input.pyseer} > {output.top_hits}
+        tail -n +2 {input.pyseer} | sort -g -k4,4 >> {output.top_hits}
+        """
+
+
+rule plot_gene_pyseer_qq:
+    input:
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
+    output:
+        plot="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_qq_plot.png",
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Creating fixed-effects gene GWAS QQ plot for {wildcards.antibiotic}: {output.plot}"
+    shell:
+        """
+        python workflow/scripts/plot_pyseer_qq.py \
+          --input {input.pyseer} \
+          --output {output.plot} \
+          --pvalue-column lrt-pvalue
+        """
+
+
+rule summarize_gene_gwas_postprocess:
+    input:
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
+        patterns="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_patterns.txt",
+    output:
+        thresholds="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_significance_thresholds.txt",
+        notes="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_notes_summary.tsv",
+        manhattan="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_manhattan_plot.png",
+    conda:
+        "envs/pyseer.yaml"
+    params:
+        label_top_n=GWAS.get("plots", {})
+        .get("gene_manhattan", {})
+        .get("label_top_n", 10),
+        label_significant=str(
+            GWAS.get("plots", {})
+            .get("gene_manhattan", {})
+            .get("label_significant", True)
+        ).lower(),
+        label_max=GWAS.get("plots", {})
+        .get("gene_manhattan", {})
+        .get("label_max", 25),
+    message:
+        "Summarizing fixed-effects gene GWAS post-processing for {wildcards.antibiotic}: thresholds, notes, and Manhattan-like plot"
+    shell:
+        """
+        python workflow/scripts/summarize_pyseer_gene_gwas.py \
+          --pyseer {input.pyseer} \
+          --patterns {input.patterns} \
+          --thresholds {output.thresholds} \
+          --notes {output.notes} \
+          --manhattan {output.manhattan} \
+          --label-top-n {params.label_top_n} \
+          --label-significant {params.label_significant} \
+          --label-max {params.label_max}
+        """
+
+
+rule prepare_assembly_accessions:
+    input:
+        clean_metadata_with_assembly="results/{antibiotic}/metadata/{antibiotic}_clean_metadata_with_assembly.csv",
+    output:
+        accessions="results/{antibiotic}/downloads/{antibiotic}_assembly_accessions.txt",
+    shell:
+        """
+        python workflow/scripts/prepare_assembly_accessions.py \
+          --metadata {input.clean_metadata_with_assembly} \
+          --output {output.accessions} \
+          --assembly-column assembly_ID
+        """
+
+
+rule download_ncbi_assemblies:
+    input:
+        accessions="results/{antibiotic}/downloads/{antibiotic}_assembly_accessions.txt",
+    output:
+        zip=temp("results/{antibiotic}/downloads/{antibiotic}_ncbi_assemblies.zip"),
+    params:
+        datasets_include=NCBI_DATASETS.get("include", "genome"),
+    shell:
+        """
+        datasets download genome accession \
+          --inputfile {input.accessions} \
+          --include {params.datasets_include} \
+          --filename {output.zip}
+        """
+
+
+rule unpack_ncbi_assemblies:
+    input:
+        zip="results/{antibiotic}/downloads/{antibiotic}_ncbi_assemblies.zip",
+        accessions="results/{antibiotic}/downloads/{antibiotic}_assembly_accessions.txt",
+    output:
+        assemblies_dir=directory("results/{antibiotic}/assemblies"),
+        manifest="results/{antibiotic}/downloads/{antibiotic}_assembly_manifest.csv",
+    shell:
+        """
+        python workflow/scripts/unpack_ncbi_assemblies.py \
+          --zip {input.zip} \
+          --accessions {input.accessions} \
+          --output-dir {output.assemblies_dir} \
+          --manifest {output.manifest}
+        """
+
+
+rule run_quast:
+    input:
+        assembly_dependencies,
+    output:
+        report_tsv="results/{antibiotic}/qc/quast/report.tsv",
+        report_txt="results/{antibiotic}/qc/quast/report.txt",
+        transposed_report_tsv="results/{antibiotic}/qc/quast/transposed_report.tsv",
+    threads:
+        int(QUAST.get("threads", 4))
+    params:
+        outdir="results/{antibiotic}/qc/quast",
+        assemblies_dir="results/{antibiotic}/assemblies",
+        min_contig_length=QUAST.get("min_contig_length", 500),
+        extension=QUAST.get("extension", "fa"),
+        reference_arg=optional_quast_arg("-r", QUAST.get("reference")),
+        annotation_arg=quast_annotation_arg(),
+    conda:
+        "envs/quast.yaml"
+    shell:
+        """
+        quast.py \
+          --threads {threads} \
+          --min-contig {params.min_contig_length} \
+          {params.reference_arg} \
+          {params.annotation_arg} \
+          -o {params.outdir} \
+          {params.assemblies_dir}/*.{params.extension}
+        """
+
+
+rule download_panaroo_qc_ref_db:
+    output:
+        ref_db=panaroo_qc_ref_db_rule_output(),
+    params:
+        url=config.get("panaroo_qc", {}).get("ref_db_url"),
+        download=config.get("panaroo_qc", {}).get("download_ref_db", False),
+    conda:
+        "envs/panaroo.yaml"
+    message:
+        "Downloading Panaroo QC Mash reference DB: {params.url}"
+    shell:
+        """
+        if [ "{params.download}" != "True" ] && [ "{params.download}" != "true" ]; then
+          echo "panaroo_qc.ref_db is configured but panaroo_qc.download_ref_db is false." >&2
+          echo "Either provide the file yourself or set download_ref_db: true." >&2
+          exit 1
+        fi
+        if [ -z "{params.url}" ] || [ "{params.url}" = "None" ] || [ "{params.url}" = "null" ]; then
+          echo "panaroo_qc.download_ref_db is true but panaroo_qc.ref_db_url is missing." >&2
+          exit 1
+        fi
+        mkdir -p $(dirname {output.ref_db})
+        wget -O {output.ref_db} {params.url}
+        """
+
+
+rule annotate_prokka:
+    input:
+        assembly_dependencies,
+    output:
+        done="results/{antibiotic}/annotation/prokka/.prokka_done",
+    threads:
+        int(config.get("prokka", {}).get("threads", 4))
+    params:
+        outdir="results/{antibiotic}/annotation/prokka",
+        assemblies_dir="results/{antibiotic}/assemblies",
+        extension=config.get("prokka", {}).get("extension", "fa"),
+    conda:
+        "envs/prokka.yaml"
+    message:
+        "Running Prokka for {wildcards.antibiotic}: assemblies={params.assemblies_dir}, outdir={params.outdir}"
+    shell:
+        """
+        echo "Prokka annotation: {wildcards.antibiotic}"
+        echo "Assembly directory: {params.assemblies_dir}"
+        echo "Prokka output directory: {params.outdir}"
+        mkdir -p {params.outdir}
+        for fasta in {params.assemblies_dir}/*.{params.extension}; do
+          test -e "$fasta" || (echo "No assembly FASTA files found in {params.assemblies_dir}" >&2; exit 1)
+          sample=$(basename "$fasta" .{params.extension})
+          prokka \
+            --outdir {params.outdir}/"$sample" \
+            --prefix "$sample" \
+            --force \
+            --cpus {threads} \
+            "$fasta"
+        done
+        touch {output.done}
+        """
+
+
+rule run_panaroo_qc:
+    input:
+        prokka_done=prokka_dependency,
+        ref_db=panaroo_qc_ref_db_inputs,
+    output:
+        done="results/{antibiotic}/qc/panaroo_qc/.qc_done",
+    threads:
+        int(config.get("panaroo_qc", {}).get("threads", 4))
+    params:
+        prokka_dir="results/{antibiotic}/annotation/prokka",
+        outdir="results/{antibiotic}/qc/panaroo_qc",
+        graph_type=config.get("panaroo_qc", {}).get("graph_type", "all"),
+        ref_db_arg=panaroo_qc_ref_db_arg(),
+    conda:
+        "envs/panaroo.yaml"
+    message:
+        "Running Panaroo QC for {wildcards.antibiotic}: prokka_gffs={params.prokka_dir}, outdir={params.outdir}"
+    shell:
+        """
+        echo "Panaroo QC: {wildcards.antibiotic}"
+        echo "Prokka GFF directory: {params.prokka_dir}"
+        echo "Panaroo QC output directory: {params.outdir}"
+        echo "Panaroo QC graph type: {params.graph_type}"
+        echo "Panaroo QC reference DB: {params.ref_db_arg}"
+        mkdir -p {params.outdir}
+        panaroo-qc \
+          -t {threads} \
+          --graph_type {params.graph_type} \
+          -i {params.prokka_dir}/*/*.gff \
+          {params.ref_db_arg} \
+          -o {params.outdir}
+        touch {output.done}
+        """
+
+
+rule run_panaroo:
+    input:
+        prokka_done=prokka_dependency,
+        panaroo_qc_done=panaroo_qc_dependency,
+    output:
+        matrix="results/{antibiotic}/pangenome/panaroo/gene_presence_absence.csv",
+        rtab="results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
+        core_alignment="results/{antibiotic}/pangenome/panaroo/core_gene_alignment.aln",
+        done="results/{antibiotic}/pangenome/panaroo/.panaroo_done",
+    threads:
+        int(config.get("panaroo", {}).get("threads", 4))
+    params:
+        prokka_dir="results/{antibiotic}/annotation/prokka",
+        outdir="results/{antibiotic}/pangenome/panaroo",
+        clean_mode=config.get("panaroo", {}).get("clean_mode", "strict"),
+    conda:
+        "envs/panaroo.yaml"
+    message:
+        "Running Panaroo for {wildcards.antibiotic}: prokka_gffs={params.prokka_dir}, outdir={params.outdir}"
+    shell:
+        """
+        echo "Panaroo pangenome: {wildcards.antibiotic}"
+        echo "Prokka GFF directory: {params.prokka_dir}"
+        echo "Panaroo output directory: {params.outdir}"
+        mkdir -p {params.outdir}
+        panaroo \
+          -i {params.prokka_dir}/*/*.gff \
+          -o {params.outdir} \
+          --clean-mode {params.clean_mode} \
+          -a core \
+          -t {threads}
+
+        test -s {output.matrix} || (echo "Panaroo did not create {output.matrix}" >&2; exit 1)
+        test -s {output.rtab} || (echo "Panaroo did not create {output.rtab}" >&2; exit 1)
+        test -s {output.core_alignment} || (echo "Panaroo did not create {output.core_alignment}" >&2; exit 1)
+        touch {output.done}
+        """
+
+
+rule fetch_sequence_metadata:
+    input:
+        clean_metadata="results/{antibiotic}/metadata/{antibiotic}_clean_metadata.csv",
+    output:
+        sequence_metadata="results/{antibiotic}/metadata/{antibiotic}_sequencing_metadata.csv",
+        combined_metadata="results/{antibiotic}/metadata/{antibiotic}_combined_metadata.csv",
+    shell:
+        """
+
+        python workflow/scripts/fetch_sequence_metadata.py \
+          --clean-metadata {input.clean_metadata} \
+          --sequence-metadata {output.sequence_metadata} \
+          --combined-metadata {output.combined_metadata}
+        """
+
+
+rule fetch_assembly_metadata:
+    input:
+        clean_metadata_with_assembly="results/{antibiotic}/metadata/{antibiotic}_clean_metadata_with_assembly.csv",
+    output:
+        assembly_metadata="results/{antibiotic}/metadata/{antibiotic}_assembly_metadata.csv",
+    shell:
+        """
+        python workflow/scripts/fetch_assembly_metadata.py \
+          --metadata {input.clean_metadata_with_assembly} \
+          --output {output.assembly_metadata}
+        """

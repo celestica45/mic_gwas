@@ -1,0 +1,56 @@
+# Snakemake
+.snakemake/
+*.done
+*.log
+
+# Conda / environments
+.conda/
+env/
+venv/
+__pycache__/
+*.pyc
+
+# Large raw sequencing files
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+
+# Alignment / variant files
+*.bam
+*.bai
+*.sam
+*.vcf
+*.vcf.gz
+*.bcf
+*.bcf.gz
+*.tbi
+*.csi
+
+# Assemblies / annotations / large outputs
+*.fasta
+*.fa
+*.fna
+*.faa
+*.gff
+*.gff3
+*.gbk
+*.gbff
+
+# Results folders
+results/
+logs/
+benchmark/
+tmp/
+temp/
+
+# Tool outputs
+quast_results/
+checkm_results/
+multiqc_data/
+multiqc_report.html
+
+# OS/editor
+.DS_Store
+.vscode/
+resources/panaroo_qc/refseq.genomes.k21s1000.msh
