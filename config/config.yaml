@@ -9,13 +9,13 @@ datasets:
 active_antibiotics:
   - oxacillin
 
-skip_metadata: true
+skip_metadata: false
 skip_assembly_metadata: true #to get info about the tool used for assembly
 skip_sequence_metadata: true #to get info about paired-end or single reads
-skip_assembly_download: true
-skip_quast: true
-skip_prokka: true
-skip_panaroo_qc: true
+skip_assembly_download: false
+skip_quast: false
+skip_prokka: false
+skip_panaroo_qc: false
 skip_pangenome: false
 skip_phenotype_data: false
 skip_gwas_population_structure: false
@@ -42,7 +42,7 @@ panaroo:
 panaroo_qc:
   threads: 1
   graph_type: "all"
-  ref_db: "resources/panaroo_qc/refseq.genomes.k21s1000.msh"
+  ref_db: null #"resources/panaroo_qc/refseq.genomes.k21s1000.msh"
   download_ref_db: true
   ref_db_url: "https://gembox.cbcb.umd.edu/mash/refseq.genomes.k21s1000.msh"
 
@@ -54,6 +54,10 @@ gwas:
     mash_mds:
       sketch_size: 10000
       max_scree_dimensions: 1
+    phylogeny_mds:
+      threads: 4
+      model: "GTR"
+      max_scree_dimensions: 30
 
   phenotype:
     sample_column: "assembly_ID"
@@ -76,7 +80,8 @@ gwas:
         methods:
           - none
           - mash_mds
-        mds_dimensions: 3
+          - phylogeny_mds
+        mds_dimensions: 10
         covariates: []
 
     snps:

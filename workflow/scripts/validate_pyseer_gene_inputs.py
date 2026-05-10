@@ -46,29 +46,35 @@ def main():
     parser = argparse.ArgumentParser(description="Validate pyseer gene GWAS inputs.")
     parser.add_argument("--phenotype", required=True)
     parser.add_argument("--rtab", required=True)
-    parser.add_argument("--distances", required=True)
+    parser.add_argument("--distances")
     parser.add_argument("--metadata", required=True)
     parser.add_argument("--covariates", nargs="*", default=[])
     args = parser.parse_args()
 
     phenotype_samples = read_phenotype_samples(args.phenotype)
     rtab_samples = read_rtab_samples(args.rtab)
-    distance_samples = read_distance_samples(args.distances)
 
-    shared = phenotype_samples & rtab_samples & distance_samples
+    shared = phenotype_samples & rtab_samples
+    if args.distances:
+        distance_samples = read_distance_samples(args.distances)
+        shared = shared & distance_samples
+
     if not shared:
+        inputs = "phenotype and Rtab"
+        if args.distances:
+            inputs += " and distance matrix"
         raise SystemExit(
-            "No shared samples across phenotype, Rtab, and Mash distance matrix. "
-            "Check sample labels."
+            f"No shared samples across {inputs}. Check sample labels."
         )
 
-    missing_distance = sorted((phenotype_samples & rtab_samples) - distance_samples)
-    if missing_distance:
-        examples = ", ".join(missing_distance[:10])
-        raise SystemExit(
-            "Samples present in phenotype/Rtab but missing from Mash distance matrix: "
-            f"{examples}"
-        )
+    if args.distances:
+        missing_distance = sorted((phenotype_samples & rtab_samples) - distance_samples)
+        if missing_distance:
+            examples = ", ".join(missing_distance[:10])
+            raise SystemExit(
+                "Samples present in phenotype/Rtab but missing from distance matrix: "
+                f"{examples}"
+            )
 
     metadata_header = read_metadata_header(args.metadata)
     missing_covariates = [

@@ -129,6 +129,8 @@ gwas:
     mash_mds:
       sketch_size: 10000
       max_scree_dimensions: 30
+    phylogeny_mds:
+      max_scree_dimensions: 30
 
   phenotype:
     sample_column: "assembly_ID"
@@ -146,6 +148,7 @@ gwas:
         methods:
           - none
           - mash_mds
+          - phylogeny_mds
         mds_dimensions: 8
         covariates: []
 
@@ -219,14 +222,16 @@ results/oxacillin/gwas/population_structure/mash_mds/mash_sketch.msh
 results/oxacillin/gwas/population_structure/mash_mds/mash_raw.tsv
 results/oxacillin/gwas/population_structure/mash_mds/mash.tsv
 results/oxacillin/gwas/population_structure/mash_mds/scree_plot.png
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_pyseer.txt
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_patterns.txt
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_top_hits.tsv
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_qq_plot.png
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_significance_thresholds.txt
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_notes_summary.tsv
-results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_manhattan_plot.png
+results/oxacillin/gwas/population_structure/phylogeny_mds/core_gene_alignment.tree
+results/oxacillin/gwas/population_structure/phylogeny_mds/phylogeny_dists.tsv
+results/oxacillin/gwas/population_structure/phylogeny_mds/scree_plot.png
+results/oxacillin/gwas/fixed_effects/gene/none/no_covariates/oxacillin_gene_none_pyseer.txt
+results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_mash_mds_pyseer.txt
+results/oxacillin/gwas/fixed_effects/gene/phylogeny_mds/no_covariates/oxacillin_gene_phylogeny_mds_pyseer.txt
+results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/oxacillin_gene_mash_mds_manhattan_plot.png
+results/oxacillin/gwas/fixed_effects/gene/phylogeny_mds/no_covariates/oxacillin_gene_phylogeny_mds_manhattan_plot.png
 results/oxacillin/gwas/fixed_effects/gene/mash_mds/no_covariates/mash_mds.pkl
+results/oxacillin/gwas/fixed_effects/gene/phylogeny_mds/no_covariates/phylogeny_mds.pkl
 results/oxacillin/qc/panaroo_qc/.qc_done
 results/oxacillin/pangenome/panaroo/gene_presence_absence.csv
 results/oxacillin/pangenome/panaroo/gene_presence_absence.Rtab

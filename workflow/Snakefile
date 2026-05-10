@@ -15,10 +15,11 @@ GWAS_PHENOTYPE = GWAS.get("phenotype", {})
 GWAS_INPUTS = GWAS.get("inputs", {})
 GWAS_POPULATION_STRUCTURE = GWAS.get("population_structure", {})
 MASH_MDS = GWAS_POPULATION_STRUCTURE.get("mash_mds", {})
+PHYLOGENY_MDS = GWAS_POPULATION_STRUCTURE.get("phylogeny_mds", {})
 
 IMPLEMENTED_GWAS_INPUTS = {"genes"}
 KNOWN_GWAS_INPUTS = {"genes", "snps", "kmers"}
-ALLOWED_GENE_POPULATION_METHODS = {"none", "mash_mds"}
+ALLOWED_GENE_POPULATION_METHODS = {"none", "mash_mds", "phylogeny_mds"}
 
 
 def optional_quast_arg(flag, value):
@@ -91,11 +92,27 @@ def phenotype_column_name(wildcards):
     return f"{DATASETS[wildcards.antibiotic]['antibiotic_name']}_log2"
 
 
-def gene_fixed_effects_dir(antibiotic):
+def gene_fixed_effects_dir(antibiotic, method):
     return (
         f"results/{antibiotic}/gwas/fixed_effects/gene/"
-        f"mash_mds/{covariate_folder('genes')}"
+        f"{method}/{covariate_folder('genes')}"
     )
+
+
+def gene_fixed_effects_outputs_for_method(antibiotic, method):
+    outdir = gene_fixed_effects_dir(antibiotic, method)
+    outputs = [
+        f"{outdir}/{antibiotic}_gene_{method}_pyseer.txt",
+        f"{outdir}/{antibiotic}_gene_{method}_patterns.txt",
+        f"{outdir}/{antibiotic}_gene_{method}_top_hits.tsv",
+        f"{outdir}/{antibiotic}_gene_{method}_qq_plot.png",
+        f"{outdir}/{antibiotic}_gene_{method}_significance_thresholds.txt",
+        f"{outdir}/{antibiotic}_gene_{method}_notes_summary.tsv",
+        f"{outdir}/{antibiotic}_gene_{method}_manhattan_plot.png",
+    ]
+    if method in ["mash_mds", "phylogeny_mds"]:
+        outputs.append(f"{outdir}/{method}.pkl")
+    return outputs
 
 
 def validate_input_covariates(input_name):
@@ -376,6 +393,20 @@ def gwas_population_structure_outputs():
             antibiotic=ACTIVE_ANTIBIOTICS,
         )
 
+    if "phylogeny_mds" in population_methods("genes"):
+        outputs += expand(
+            "results/{antibiotic}/gwas/population_structure/phylogeny_mds/core_gene_alignment.tree",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+        outputs += expand(
+            "results/{antibiotic}/gwas/population_structure/phylogeny_mds/phylogeny_dists.tsv",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+        outputs += expand(
+            "results/{antibiotic}/gwas/population_structure/phylogeny_mds/scree_plot.png",
+            antibiotic=ACTIVE_ANTIBIOTICS,
+        )
+
     return outputs
 
 
@@ -384,21 +415,10 @@ def gwas_fixed_effects_outputs(respect_skip=True):
         return []
 
     outputs = []
-    if "genes" in active_gwas_inputs() and "mash_mds" in population_methods("genes"):
+    if "genes" in active_gwas_inputs():
         for antibiotic in ACTIVE_ANTIBIOTICS:
-            outdir = gene_fixed_effects_dir(antibiotic)
-            outputs.extend(
-                [
-                    f"{outdir}/{antibiotic}_gene_pyseer.txt",
-                    f"{outdir}/{antibiotic}_gene_patterns.txt",
-                    f"{outdir}/{antibiotic}_gene_top_hits.tsv",
-                    f"{outdir}/{antibiotic}_gene_qq_plot.png",
-                    f"{outdir}/{antibiotic}_gene_significance_thresholds.txt",
-                    f"{outdir}/{antibiotic}_gene_notes_summary.tsv",
-                    f"{outdir}/{antibiotic}_gene_manhattan_plot.png",
-                    f"{outdir}/mash_mds.pkl",
-                ]
-            )
+            for method in population_methods("genes"):
+                outputs.extend(gene_fixed_effects_outputs_for_method(antibiotic, method))
 
     return outputs
 
@@ -460,6 +480,11 @@ rule quast_stage:
 rule prokka_stage:
     input:
         prokka_outputs(),
+
+
+rule assembly_download_stage:
+    input:
+        assembly_download_outputs(),
 
 
 rule phenotype_data_stage:
@@ -646,6 +671,112 @@ rule plot_mash_mds_scree:
         """
 
 
+rule build_core_gene_iqtree:
+    input:
+        alignment="results/{antibiotic}/pangenome/panaroo/core_gene_alignment.aln",
+    output:
+        tree="results/{antibiotic}/gwas/population_structure/phylogeny_mds/core_gene_alignment.tree",
+    threads:
+        PHYLOGENY_MDS.get("threads", 4)
+    params:
+        prefix="results/{antibiotic}/gwas/population_structure/phylogeny_mds/core_gene_alignment",
+        model=PHYLOGENY_MDS.get("model", "GTR"),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Building core-gene IQ-TREE phylogeny for {wildcards.antibiotic}: model={params.model}, output={output.tree}"
+    shell:
+        """
+        mkdir -p $(dirname {output.tree})
+        iqtree2 \
+          -s {input.alignment} \
+          -m {params.model} \
+          -nt {threads} \
+          -pre {params.prefix}
+        cp {params.prefix}.treefile {output.tree}
+        test -s {output.tree} || (echo "IQ-TREE did not create {output.tree}" >&2; exit 1)
+        """
+
+
+rule calculate_phylogeny_distances:
+    input:
+        tree="results/{antibiotic}/gwas/population_structure/phylogeny_mds/core_gene_alignment.tree",
+    output:
+        distances="results/{antibiotic}/gwas/population_structure/phylogeny_mds/phylogeny_dists.tsv",
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Calculating phylogeny distance matrix for {wildcards.antibiotic}: {output.distances}"
+    shell:
+        """
+        python workflow/scripts/phylogeny_distance.py \
+          {input.tree} \
+          > {output.distances}
+        """
+
+
+rule plot_phylogeny_mds_scree:
+    input:
+        distances="results/{antibiotic}/gwas/population_structure/phylogeny_mds/phylogeny_dists.tsv",
+    output:
+        plot="results/{antibiotic}/gwas/population_structure/phylogeny_mds/scree_plot.png",
+    params:
+        max_dimensions=PHYLOGENY_MDS.get(
+            "max_scree_dimensions", MASH_MDS.get("max_scree_dimensions", 30)
+        ),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Creating phylogeny MDS scree plot for {wildcards.antibiotic}: {output.plot}"
+    shell:
+        """
+        scree_plot_pyseer \
+          --max-dimensions {params.max_dimensions} \
+          --output {output.plot} \
+          {input.distances}
+        """
+
+
+rule run_pyseer_gene_fixed_effects_none:
+    input:
+        phenotype="results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
+        metadata="results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv",
+        rtab="results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
+    output:
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/none/{covariate_status}/{antibiotic}_gene_none_pyseer.txt",
+        patterns="results/{antibiotic}/gwas/fixed_effects/gene/none/{covariate_status}/{antibiotic}_gene_none_patterns.txt",
+    params:
+        outdir="results/{antibiotic}/gwas/fixed_effects/gene/none/{covariate_status}",
+        phenotype_column=phenotype_column_name,
+        covariates=lambda wc: " ".join(covariates_for_input("genes")),
+        covariate_args=lambda wc: pyseer_covariate_args("genes", wc.antibiotic),
+        covariate_folder=lambda wc: covariate_folder("genes"),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Running fixed-effects gene GWAS for {wildcards.antibiotic}: population=none, covariates={params.covariate_folder}"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python workflow/scripts/validate_pyseer_gene_inputs.py \
+          --phenotype {input.phenotype} \
+          --rtab {input.rtab} \
+          --metadata {input.metadata} \
+          --covariates {params.covariates}
+        pyseer \
+          --continuous \
+          --phenotypes {input.phenotype} \
+          --phenotype-column {params.phenotype_column} \
+          --pres {input.rtab} \
+          --no-distances \
+          --output-patterns {output.patterns} \
+          {params.covariate_args} \
+          > {output.pyseer}
+        test -s {output.pyseer} || (echo "pyseer did not create {output.pyseer}" >&2; exit 1)
+        test -s {output.patterns} || (echo "pyseer did not create {output.patterns}" >&2; exit 1)
+        """
+
+
 rule run_pyseer_gene_fixed_effects_mash_mds:
     input:
         phenotype="results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
@@ -653,8 +784,8 @@ rule run_pyseer_gene_fixed_effects_mash_mds:
         rtab="results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
         distances="results/{antibiotic}/gwas/population_structure/mash_mds/mash.tsv",
     output:
-        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
-        patterns="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_patterns.txt",
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_mash_mds_pyseer.txt",
+        patterns="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_mash_mds_patterns.txt",
         mds="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/mash_mds.pkl",
     params:
         outdir="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}",
@@ -693,11 +824,58 @@ rule run_pyseer_gene_fixed_effects_mash_mds:
         """
 
 
+rule run_pyseer_gene_fixed_effects_phylogeny_mds:
+    input:
+        phenotype="results/{antibiotic}/gwas/phenotypes/{antibiotic}_phenotype.tsv",
+        metadata="results/{antibiotic}/gwas/phenotypes/{antibiotic}_metadata.tsv",
+        rtab="results/{antibiotic}/pangenome/panaroo/gene_presence_absence.Rtab",
+        distances="results/{antibiotic}/gwas/population_structure/phylogeny_mds/phylogeny_dists.tsv",
+    output:
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/phylogeny_mds/{covariate_status}/{antibiotic}_gene_phylogeny_mds_pyseer.txt",
+        patterns="results/{antibiotic}/gwas/fixed_effects/gene/phylogeny_mds/{covariate_status}/{antibiotic}_gene_phylogeny_mds_patterns.txt",
+        mds="results/{antibiotic}/gwas/fixed_effects/gene/phylogeny_mds/{covariate_status}/phylogeny_mds.pkl",
+    params:
+        outdir="results/{antibiotic}/gwas/fixed_effects/gene/phylogeny_mds/{covariate_status}",
+        phenotype_column=phenotype_column_name,
+        mds_dimensions=lambda wc: mds_dimensions("genes"),
+        covariates=lambda wc: " ".join(covariates_for_input("genes")),
+        covariate_args=lambda wc: pyseer_covariate_args("genes", wc.antibiotic),
+        covariate_folder=lambda wc: covariate_folder("genes"),
+    conda:
+        "envs/pyseer.yaml"
+    message:
+        "Running fixed-effects gene GWAS for {wildcards.antibiotic}: population=phylogeny_mds, covariates={params.covariate_folder}, mds_dimensions={params.mds_dimensions}"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python workflow/scripts/validate_pyseer_gene_inputs.py \
+          --phenotype {input.phenotype} \
+          --rtab {input.rtab} \
+          --distances {input.distances} \
+          --metadata {input.metadata} \
+          --covariates {params.covariates}
+        pyseer \
+          --continuous \
+          --phenotypes {input.phenotype} \
+          --phenotype-column {params.phenotype_column} \
+          --pres {input.rtab} \
+          --distances {input.distances} \
+          --save-m {params.outdir}/phylogeny_mds \
+          --max-dimensions {params.mds_dimensions} \
+          --output-patterns {output.patterns} \
+          {params.covariate_args} \
+          > {output.pyseer}
+        test -s {output.pyseer} || (echo "pyseer did not create {output.pyseer}" >&2; exit 1)
+        test -s {output.patterns} || (echo "pyseer did not create {output.patterns}" >&2; exit 1)
+        test -s {output.mds} || (echo "pyseer did not create {output.mds}" >&2; exit 1)
+        """
+
+
 rule summarize_gene_pyseer_top_hits:
     input:
-        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_pyseer.txt",
     output:
-        top_hits="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_top_hits.tsv",
+        top_hits="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_top_hits.tsv",
     message:
         "Sorting fixed-effects gene GWAS hits for {wildcards.antibiotic}: {output.top_hits}"
     shell:
@@ -710,9 +888,9 @@ rule summarize_gene_pyseer_top_hits:
 
 rule plot_gene_pyseer_qq:
     input:
-        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_pyseer.txt",
     output:
-        plot="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_qq_plot.png",
+        plot="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_qq_plot.png",
     conda:
         "envs/pyseer.yaml"
     message:
@@ -728,12 +906,12 @@ rule plot_gene_pyseer_qq:
 
 rule summarize_gene_gwas_postprocess:
     input:
-        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_pyseer.txt",
-        patterns="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_patterns.txt",
+        pyseer="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_pyseer.txt",
+        patterns="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_patterns.txt",
     output:
-        thresholds="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_significance_thresholds.txt",
-        notes="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_notes_summary.tsv",
-        manhattan="results/{antibiotic}/gwas/fixed_effects/gene/mash_mds/{covariate_status}/{antibiotic}_gene_manhattan_plot.png",
+        thresholds="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_significance_thresholds.txt",
+        notes="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_notes_summary.tsv",
+        manhattan="results/{antibiotic}/gwas/fixed_effects/gene/{population_method}/{covariate_status}/{antibiotic}_gene_{population_method}_manhattan_plot.png",
     conda:
         "envs/pyseer.yaml"
     params:
@@ -782,33 +960,27 @@ rule download_ncbi_assemblies:
     input:
         accessions="results/{antibiotic}/downloads/{antibiotic}_assembly_accessions.txt",
     output:
-        zip=temp("results/{antibiotic}/downloads/{antibiotic}_ncbi_assemblies.zip"),
+        zips=temp(directory("results/{antibiotic}/downloads/ncbi_assemblies_zips")),
     params:
+        batch_size=10,
         datasets_include=NCBI_DATASETS.get("include", "genome"),
-    shell:
-        """
-        datasets download genome accession \
-          --inputfile {input.accessions} \
-          --include {params.datasets_include} \
-          --filename {output.zip}
-        """
+    retries:
+        3
+    conda:
+        "envs/ncbi_datasets.yaml"
+    script:
+        "scripts/download_ncbi_assemblies.py"
 
 
 rule unpack_ncbi_assemblies:
     input:
-        zip="results/{antibiotic}/downloads/{antibiotic}_ncbi_assemblies.zip",
+        zips="results/{antibiotic}/downloads/ncbi_assemblies_zips",
         accessions="results/{antibiotic}/downloads/{antibiotic}_assembly_accessions.txt",
     output:
         assemblies_dir=directory("results/{antibiotic}/assemblies"),
         manifest="results/{antibiotic}/downloads/{antibiotic}_assembly_manifest.csv",
-    shell:
-        """
-        python workflow/scripts/unpack_ncbi_assemblies.py \
-          --zip {input.zip} \
-          --accessions {input.accessions} \
-          --output-dir {output.assemblies_dir} \
-          --manifest {output.manifest}
-        """
+    script:
+        "scripts/collect_ncbi_assemblies.py"
 
 
 rule run_quast:

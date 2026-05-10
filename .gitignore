@@ -54,3 +54,11 @@ multiqc_report.html
 .DS_Store
 .vscode/
 resources/panaroo_qc/refseq.genomes.k21s1000.msh
+
+# Generated local files
+dag.png
+*.Zone.Identifier
+
+# Generated local files
+dag.png
+*.Zone.Identifier
